@@ -62,9 +62,9 @@ def FromTemporalGraphToSparseAdj(filename="/home/xuchenhao/datasets/CollegeMsg/C
                                  save_path=None):
     TemporalGraph = LoadTemporalGraph(filename=filename)
     node_num = len(TemporalGraph["node_to_idx"])
-    time_num = len(np.unique(TemporalGraph["timestamp"]))
+    time_unique = np.unique(TemporalGraph["timestamp"])
     nxg = nx.Graph()
-    nxg.add_nodes_from(range(node_num*time_num))
+    nxg.add_nodes_from(range(node_num*(time_unique.min()), node_num*(time_unique.max()+1)))
     temporal_src = TemporalGraph["src"] + node_num * TemporalGraph["timestamp"]
     temporal_dst = TemporalGraph["dst"] + node_num * TemporalGraph["timestamp"]
     temporal_edges = np.stack([temporal_src, temporal_dst], axis=1)
@@ -76,6 +76,8 @@ def FromTemporalGraphToSparseAdj(filename="/home/xuchenhao/datasets/CollegeMsg/C
     f.close()
     return nxg
 
+if __name__ == '__main__':
+    nxg = FromTemporalGraphToSparseAdj()
 
 DEVICE = "cuda:0"
 EDGE_OVERLAP_LIMIT = {
