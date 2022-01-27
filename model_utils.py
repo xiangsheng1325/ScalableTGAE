@@ -5,7 +5,7 @@ from os import stat
 from platform import node
 from random import sample
 import time
-from tkinter import N
+# from tkinter import N
 
 from pandas import array
 from models import *
