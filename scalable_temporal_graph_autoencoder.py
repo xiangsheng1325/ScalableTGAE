@@ -76,8 +76,6 @@ def FromTemporalGraphToSparseAdj(filename="/home/xuchenhao/datasets/CollegeMsg/C
     f.close()
     return nxg
 
-if __name__ == '__main__':
-    nxg = FromTemporalGraphToSparseAdj()
 
 DEVICE = "cuda:0"
 EDGE_OVERLAP_LIMIT = {
