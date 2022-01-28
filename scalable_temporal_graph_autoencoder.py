@@ -24,7 +24,8 @@ def loadGraph(filename):
     return sp.csr_matrix(arr)
 
 
-def LoadTemporalGraph(filename="/home/xuchenhao/datasets/CollegeMsg/CollegeMsg.txt"):
+def LoadTemporalGraph(filename="/home/xuchenhao/datasets/CollegeMsg/CollegeMsg.txt",
+                      save_path=None):
     """
     读temporal graph文件名，输出temporal graph
     :param filename: 数据集文件名，默认为edgelist，header默认为None，每一行默认为(src, dst, unix时间戳)
@@ -54,6 +55,9 @@ def LoadTemporalGraph(filename="/home/xuchenhao/datasets/CollegeMsg/CollegeMsg.t
     dst_names = dst_names.apply(lambda x: node_name_to_idx[x])
     temporal_dict["src"] = src_names.values
     temporal_dict["dst"] = dst_names.values
+    if save_path is None:
+        save_path = os.path.join("/home/xuchenhao/datasets/CollegeMsg/", "edgelist_date.csv")
+    pd.DataFrame(temporal_dict).to_csv(save_path, sep=" ", header=False, index=False)
     temporal_dict["node_to_idx"] = node_name_to_idx
     return temporal_dict
 
