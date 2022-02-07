@@ -353,8 +353,8 @@ if __name__ == '__main__':
     for epoch in range(args.max_epochs):
         num_edges_all = 0
         num_loss_all = 0
+        model.train()
         for step, (input_nodes, seeds, blocks) in enumerate(train_dataloader):
-            model.train()
             batch_inputs, batch_labels = coo_to_csp(feat[input_nodes.cpu(), :].tocoo()).to(args.device), \
                                          coo_to_csp(adj[seeds.cpu(), :].tocoo()).to_dense().to(args.device)
             blocks = [block.to(args.device) for block in blocks]
@@ -366,10 +366,28 @@ if __name__ == '__main__':
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            if (step+1) % 20 == 0:
+            if (step+1) % 50 == 0:
                 print("Epoch: {:03d}, Step: {:03d}, loss: {:.7f}".format(epoch+1, step+1, loss.cpu().data))
             else:
                 sys.stdout.flush()
                 sys.stdout.write("Epoch: {:03d}, Step: {:03d}, loss: {:.7f}\r".format(epoch+1, step+1, loss.cpu().data))
                 sys.stdout.flush()
         print("Epoch: {:03d}, overall loss: {:.7f}".format(epoch + 1, num_loss_all/num_edges_all))
+        if (epoch+1) % 5 == 0:
+            gen_mat = sp.csr_matrix(adj.shape)
+            model.eval()
+            with torch.no_grad():
+                for step, (input_nodes, seeds, blocks) in enumerate(train_dataloader):
+                    test_inputs = coo_to_csp(feat[input_nodes.cpu(), :].tocoo()).to(args.device)
+                    blocks = [block for block in blocks]
+                    test_batch_logits = torch.softmax(model(blocks, test_inputs), dim=-1)
+                    num_edges = adj[seeds.cpu(), :].sum()
+                    gen_mat[seeds.cpu(), :] = edge_from_scores(test_batch_logits.cpu().numpy(), num_edges)
+                    if (step+1) % 20 == 0:
+                        print("Epoch: {:03d}, Generating Step: {:03d}".format(epoch+1, step+1))
+                    else:
+                        sys.stdout.flush()
+                        sys.stdout.write("Epoch: {:03d}, Generating Step: {:03d}\r".format(epoch+1, step+1))
+                        sys.stdout.flush()
+            eo = adj.multiply(gen_mat).sum() / adj.sum()
+            print("Epoch: {:03d}, Edge Overlap: {:07f}".format(epoch + 1, eo))

@@ -310,13 +310,7 @@ class Cell(object):
         N = A.shape[1]
         gamma = np.sqrt(2 / (N_all + H))
 
-        if g_type == 'cell':
-            self.g = G_cell(N_all, H, gamma).to(device)
-        elif g_type == 'fc':
-            self.g = G_fc(N_all, H, gamma).to(device)
-        elif g_type == 'svd':
-            self.g = G_svd(N_all, H, gamma).to(device)
-        elif g_type == 'temporal':
+        if g_type == 'temporal':
             self.g = G_temporal(N_all, N, T, H).to(device)
         else:
             raise NameError

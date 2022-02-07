@@ -1,5 +1,8 @@
+import copy
+
 import numpy as np
 import scipy.sparse as sp
+import warnings
 from scipy.sparse.csgraph import minimum_spanning_tree, connected_components
 import pandas as pd
 from scipy.sparse.linalg import eigs
@@ -416,6 +419,25 @@ def graph_from_scores(scores_matrix, n_edges, self_loop=False):
         target_g[(triu_ixs[1][extra_edges], triu_ixs[0][extra_edges])] = 1
 
     return target_g
+
+
+def edge_from_scores(scores_matrix, n_edges):
+    degrees = scores_matrix.sum(1)  # The row sum over the scores_matrix.
+    B = scores_matrix.shape[0]
+    N = scores_matrix.shape[1]
+    target_g = sp.csr_matrix(scores_matrix.shape)
+    probs = copy.deepcopy(scores_matrix)
+    for n in range(B):  # Iterate over the nodes
+        target = np.random.choice(N, p=scores_matrix[n] / degrees[n], size=1)
+        target_g[n, target] = 1
+        probs[n, target] = 0
+    diff = np.round(n_edges - target_g.sum())
+    if diff > 0:
+        probs = probs.reshape(-1)
+        extra_edges = np.random.choice(probs.shape[0], replace=False, p=probs/probs.sum(), size=int(diff))
+        target_g[extra_edges//N, extra_edges%N] = 1
+    return target_g
+
 
 if __name__ == '__main__':
     print("Success!")
