@@ -2,9 +2,11 @@ import datetime
 import os.path
 import pickle
 from curses import raw
-
+from dgl.dataloading import MultiLayerFullNeighborSampler
+from dgl.dataloading.pytorch import NodeDataLoader
 import networkx as nx
-
+import dgl
+import numpy as np
 from data_utils import *
 from eval_utils import *
 from model_utils import *
@@ -57,6 +59,8 @@ def LoadTemporalGraph(filename="/home/xuchenhao/datasets/CollegeMsg/CollegeMsg.t
     temporal_dict["dst"] = dst_names.values
     if save_path is None:
         save_path = os.path.join("/home/xuchenhao/datasets/CollegeMsg/", "edgelist_date.csv")
+    else:
+        save_path = os.path.join(save_path, "edgelist_date.csv")
     pd.DataFrame(temporal_dict).to_csv(save_path, sep=" ", header=False, index=False)
     temporal_dict["node_to_idx"] = node_name_to_idx
     return temporal_dict
@@ -64,35 +68,39 @@ def LoadTemporalGraph(filename="/home/xuchenhao/datasets/CollegeMsg/CollegeMsg.t
 
 def FromTemporalGraphToSparseAdj(filename="/home/xuchenhao/datasets/CollegeMsg/CollegeMsg.txt",
                                  save_path=None):
-    TemporalGraph = LoadTemporalGraph(filename=filename)
-    node_num = len(TemporalGraph["node_to_idx"])
-    time_unique = np.unique(TemporalGraph["timestamp"])
-    nxg = nx.Graph()
-    nxg.add_nodes_from(range(node_num*(time_unique.min()), node_num*(time_unique.max()+1)))
-    temporal_src = TemporalGraph["src"] + node_num * TemporalGraph["timestamp"]
-    temporal_dst = TemporalGraph["dst"] + node_num * TemporalGraph["timestamp"]
-    temporal_edges = np.stack([temporal_src, temporal_dst], axis=1)
-    nxg.add_edges_from(temporal_edges)
     if save_path is None:
         save_path = "/home/xuchenhao/datasets/CollegeMsg/"
-    f = open(os.path.join(save_path, "networkx_graph.pkl"), "wb")
-    pickle.dump(nxg, f)
-    f.close()
-    return nxg
+    TemporalGraph = LoadTemporalGraph(filename=filename, save_path=save_path)
+    node_num = len(TemporalGraph["node_to_idx"])
+    time_unique = np.unique(TemporalGraph["timestamp"])
+    temporal_src = TemporalGraph["src"] + node_num * TemporalGraph["timestamp"]
+    temporal_dst = TemporalGraph["dst"] + node_num * TemporalGraph["timestamp"]
+    inner_src = np.array(range(time_unique.min() * node_num, time_unique.max() * node_num))
+    inner_dst = np.array(range((time_unique.min() + 1) * node_num, (time_unique.max() + 1) * node_num))
+    self_src = np.array(range(time_unique.min() * node_num, (time_unique.max() + 1) * node_num))
+    self_dst = np.array(range(time_unique.min() * node_num, (time_unique.max() + 1) * node_num))
+    temporal_edges = (np.concatenate([temporal_src, inner_src, self_src]),
+                      np.concatenate([temporal_dst, inner_dst, self_dst]))
+    dglg = dgl.graph(temporal_edges)
+    save_path = os.path.join("/home/xuchenhao/datasets/CollegeMsg/", "dgl_graph.bin")
+    dgl.data.utils.save_graphs(save_path, [dglg])
+    target_src = TemporalGraph["src"] + node_num * TemporalGraph["timestamp"]
+    target_dst = TemporalGraph["dst"]
+    train_nids = np.unique(target_src)
+    return sp.coo_matrix((np.ones(len(target_src)), (target_src, target_dst)),
+                         shape=(node_num * (time_unique.max() - time_unique.min() + 1), node_num)), train_nids
+
 
 
 DEVICE = "cuda:0"
 EDGE_OVERLAP_LIMIT = {
-    'CORA-ML' : 0.7, 
-    'Citeseer' : 0.8,
-    'PolBlogs': 0.41,
-    'RT-GOP': 0.7
+    'CORA-ML' : 0.9,
 }
-# MAX_STEPS = 400
-MAX_STEPS = 120
+MAX_STEPS = 400
+# MAX_STEPS = 120
 
 
-def random_seed(seed):
+def random_seed(seed=42):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
@@ -108,7 +116,7 @@ def param_compare(s1, s2, o):
     s2.name = 'median'
     d3 = d3.append(s1)
     d3 = d3.append(s2)
-    d3.to_csv(o)
+    d3.to_csv(o, index=False)
 
 
 class parse_arguments(object):
@@ -282,12 +290,86 @@ def main(args):
     # original_stat = compute_graph_statistics(_A_obs)
     # df[args.data_name] = list(original_stat.values()) + [1, 1, 1]
     if args.table_path is not None:
-        stat_df.to_csv(args.table_path)
+        stat_df.to_csv(args.table_path, index=False)
         if args.raw_param_path and args.result_path:
             param_compare(args.raw_param_path, args.table_path, args.result_path)
 
 
-args = parse_arguments()
+# args = parse_arguments()
+# if args.seed is not None:
+#     random_seed(args.seed)
+# main(args)
+
+
+class ParseArguments(object):
+    def __init__(self):
+        self.data_path = "/home/xuchenhao/datasets/CollegeMsg/CollegeMsg.txt"
+        self.data_name = 'CollegeMsg'
+        self.device = 'cuda:0'
+        self.statistics_step = 10
+        self.number_of_samples = 5
+        self.n_layers = 1
+        self.H = 128
+        self.n_heads = 4
+        self.batch_size = 128
+        self.g_type = 'temporal'
+        self.lr = 0.0003
+        self.weight_decay = 1e-6
+        self.max_epochs = 200
+        self.graphic_mode = 'overlap'
+        self.criterion = 'eo'
+        self.eo_limit = 0.99
+        self.seed = 42
+
+
+args = ParseArguments()
 if args.seed is not None:
     random_seed(args.seed)
-main(args)
+
+
+if __name__ == '__main__':
+    label_adj, nids = FromTemporalGraphToSparseAdj()
+    label_mat = label_adj.tocsr()[nids, :]
+    num_nodes = label_adj.shape[1]
+    t = label_adj.shape[0] // num_nodes
+    feat = sp.diags(np.ones(num_nodes * t).astype(np.float32)).tocsr()
+    adj = label_adj.tocsr()
+    dgl_g = dgl.load_graphs(os.path.join("/home/xuchenhao/datasets/CollegeMsg/", "dgl_graph.bin"))[0][0]
+    dgl_g = dgl.add_self_loop(dgl_g)
+    train_sampler = MultiLayerFullNeighborSampler(n_layers=args.n_layers)
+    train_dataloader = NodeDataLoader(dgl_g.to(args.device),
+                                      nids=torch.from_numpy(nids).long().to(args.device),
+                                      block_sampler=train_sampler,
+                                      device=args.device,
+                                      batch_size=args.batch_size,
+                                      shuffle=True,
+                                      drop_last=False,
+                                      num_workers=0)
+    model = ScalableTGAE(in_dim=num_nodes * t,
+                         hid_dim=int(args.H/args.n_heads),
+                         n_heads=args.n_heads,
+                         out_dim=num_nodes).to(args.device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    for epoch in range(args.max_epochs):
+        num_edges_all = 0
+        num_loss_all = 0
+        for step, (input_nodes, seeds, blocks) in enumerate(train_dataloader):
+            model.train()
+            batch_inputs, batch_labels = coo_to_csp(feat[input_nodes.cpu(), :].tocoo()).to(args.device), \
+                                         coo_to_csp(adj[seeds.cpu(), :].tocoo()).to_dense().to(args.device)
+            blocks = [block.to(args.device) for block in blocks]
+            train_batch_logits = model(blocks, batch_inputs)
+            num_edges = batch_labels.sum() / 2
+            num_edges_all += num_edges
+            loss = -0.5 * torch.sum(batch_labels * torch.log_softmax(train_batch_logits, dim=-1)) / num_edges
+            num_loss_all += loss.cpu().data * num_edges
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            if (step+1) % 20 == 0:
+                print("Epoch: {:03d}, Step: {:03d}, loss: {:.7f}".format(epoch+1, step+1, loss.cpu().data))
+            else:
+                sys.stdout.flush()
+                sys.stdout.write("Epoch: {:03d}, Step: {:03d}, loss: {:.7f}\r".format(epoch+1, step+1, loss.cpu().data))
+                sys.stdout.flush()
+        print("Epoch: {:03d}, overall loss: {:.7f}".format(epoch + 1, num_loss_all/num_edges_all))
