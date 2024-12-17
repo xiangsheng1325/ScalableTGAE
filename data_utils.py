@@ -26,9 +26,28 @@ def load_npy(file_name):
     loader = np.load(file_name, allow_pickle=True)
     if True:
         loader = loader.tolist()
-        adj_matrix = sp.csr_matrix((loader['adj_data'], loader['adj_indices'],
-                                    loader['adj_indptr']), shape=loader['adj_shape'])
+        # 确保数据是numpy数组
+        adj_data = np.array(loader['adj_data'])
+        adj_indices = np.array(loader['adj_indices'])
+        adj_indptr = np.array(loader['adj_indptr'])
+        # 创建稀疏矩阵
+        adj_matrix = sp.csr_matrix((adj_data, adj_indices, adj_indptr), shape=loader['adj_shape'])
+         # 调整为方阵
+        #num_rows, num_cols = adj_matrix.shape
+        #if num_rows != num_cols:
+            #max_dim = max(num_rows, num_cols)
+            #square_matrix = sp.csr_matrix((max_dim, max_dim))
+            #square_matrix[:num_rows, :num_cols] = adj_matrix
+            #adj_matrix = square_matrix
 
+        if 'attr_data' in loader:
+            attr_data = np.array(loader['attr_data'])
+            attr_indices = np.array(loader['attr_indices'])
+            attr_indptr = np.array(loader['attr_indptr'])
+        
+            attr_matrix = sp.csr_matrix((attr_data, attr_indices, attr_indptr), shape=loader['attr_shape'])
+        labels = loader.get('labels')
+        return adj_matrix, attr_matrix if 'attr_data' in loader else None,labels
         if 'attr_data' in loader:
             attr_matrix = sp.csr_matrix((loader['attr_data'], loader['attr_indices'],
                                          loader['attr_indptr']), shape=loader['attr_shape'])

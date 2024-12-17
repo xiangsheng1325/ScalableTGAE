@@ -214,7 +214,7 @@ class StatisticCollector(Callback):
         self.evolve = evolve
         self.g_path = g_path
 
-    def invoke(self, loss, model, nonzero_rows, last=False, self_loop=False):
+    def invoke(self, loss, model, last=False, self_loop=False):
         """Evaluates the link prediction performance and collect graph statistics.
         Args:
             loss(float): The latest loss value - not needed.
@@ -265,6 +265,8 @@ class StatisticCollector(Callback):
                     generated_graphs[i][j][generated_graphs[i][j] > 1] = 1
         
         # Save graphs
+        print("g_graph:",self.g_path)
+        print("last:",last)
         if last and self.g_path:
             np.save(self.g_path, np.array(generated_graphs))
 

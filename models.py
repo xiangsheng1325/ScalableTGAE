@@ -1,10 +1,11 @@
 import sys
 import numpy as np
-from re import T
+#from re import T
 # from turtle import forward
 from numpy import eye
 import torch
 from dgl import function as fn
+from collections.abc import Mapping, Iterable
 from dgl.nn.functional import edge_softmax
 import torch.nn as nn
 import torch.nn.functional as F
