@@ -221,9 +221,9 @@ class StatisticCollector(Callback):
             model(Cell): The instance of the model being trained.
         """
         model.update_scores_matrix()
-        roc_auc, avg_prec = link_prediction_performance(scores_matrix=model._scores_matrix, 
-                                val_ones=self.test_ones, 
-                                val_zeros=self.test_zeros)
+        # roc_auc, avg_prec = link_prediction_performance(scores_matrix=model._scores_matrix, 
+        #                         val_ones=self.test_ones, 
+        #                         val_zeros=self.test_zeros)
 
         generated_graphs = [model.sample_graph() for _ in range(self.n_samples)]
         # current_overlaps = [edge_overlap(self.A, gg) / model.num_edges for gg in generated_graphs]
