@@ -100,7 +100,64 @@ class G_temporal(nn.Module):
         W = self.decoder(self.encoder(pretrained_emb=pretrained_emb))
         # W -= W.max(dim=-1, keepdims=True)[0]
         return W
+    
+class TransformerLayer(nn.Module):
+    def __init__(self, in_dim=128, hid_dim=32, n_heads=4, dropout=0.1):
+        super(TransformerLayer, self).__init__()
+        self.hid_dim = hid_dim
+        self.n_heads = n_heads
+        self.d_k = hid_dim // n_heads
 
+        # Multi-Head Attention components
+        self.q_proj = nn.Linear(in_dim, hid_dim)
+        self.k_proj = nn.Linear(in_dim, hid_dim)
+        self.v_proj = nn.Linear(in_dim, hid_dim)
+        self.out_proj = nn.Linear(hid_dim, hid_dim)
+
+        # Feedforward network
+        self.ffn = nn.Sequential(
+            nn.Linear(hid_dim, 4 * hid_dim),
+            nn.ReLU(),
+            nn.Linear(4 * hid_dim, hid_dim)
+        )
+
+        # Normalization and dropout
+        self.norm1 = nn.LayerNorm(hid_dim)
+        self.norm2 = nn.LayerNorm(hid_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, graph, feat):
+        # Multi-Head Self-Attention
+        # 确保 feat 的大小与目标节点数量一致
+        # if feat.is_sparse:
+        #     feat = feat.to_dense()
+        # feat = feat[:graph.number_of_dst_nodes()]
+        # feat = feat[:graph.number_of_dst_nodes()]
+        print(graph.dstdata.keys())
+        dst_nodes = graph.dstdata['_ID']
+        feat = feat.to_dense()
+        feat = feat[dst_nodes]
+        q = self.q_proj(feat).view(-1, self.n_heads, self.d_k)
+        k = self.k_proj(feat).view(-1, self.n_heads, self.d_k)
+        v = self.v_proj(feat).view(-1, self.n_heads, self.d_k)
+        print("feat.shape:", feat.shape)
+        print("number of dst nodes:", graph.number_of_dst_nodes())
+        graph.srcdata.update({'k': k, 'v': v})
+        graph.dstdata.update({'q': q})
+        graph.apply_edges(fn.u_dot_v('q', 'k', 'score'))
+        e = graph.edata.pop('score') / (self.d_k ** 0.5)
+        graph.edata['a'] = edge_softmax(graph, e)
+        graph.update_all(fn.u_mul_e('v', 'a', 'm'), fn.sum('m', 'z'))
+        z = graph.dstdata['z'].reshape(-1, self.hid_dim)
+
+        # Residual connection and layer normalization
+        z = self.norm1(feat + self.dropout(self.out_proj(z)))
+
+        # Feedforward network with residual connection
+        ff_out = self.ffn(z)
+        z = self.norm2(z + self.dropout(ff_out))
+
+        return z
 
 class GATLayer(nn.Module):
     def __init__(self, in_dim=128, hid_dim=32, n_heads=4):
@@ -145,16 +202,17 @@ class GATLayer(nn.Module):
 
 
 class ScalableTGAE(nn.Module):
-    def __init__(self, in_dim=128, hid_dim=32, n_heads=4, out_dim=128):
+    def __init__(self, in_dim=128, hid_dim=32, n_heads=4, out_dim=128,dropout=0.1):
         super(ScalableTGAE, self).__init__()
         # self.input_encoder = nn.Linear(out_dim, in_dim)
-        self.attention_encoder = GATLayer(in_dim=in_dim, hid_dim=hid_dim, n_heads=n_heads)
-        self.decoder = nn.Linear(n_heads * hid_dim, out_dim)
+        # self.attention_encoder = GATLayer(in_dim=in_dim, hid_dim=hid_dim, n_heads=n_heads)
+        self.attention_encoder = TransformerLayer(in_dim=in_dim, hid_dim=hid_dim, n_heads=n_heads, dropout=dropout)
+        # self.decoder = nn.Linear(n_heads * hid_dim, out_dim)
+        self.decoder = nn.Linear(hid_dim, out_dim)
 
     def forward(self, blocks, feat):
         return self.decoder(self.attention_encoder(blocks[0], feat))
-
-
+    
 def coo_to_csp(sp_coo):
     num = sp_coo.shape[0]
     feat_num = sp_coo.shape[1]

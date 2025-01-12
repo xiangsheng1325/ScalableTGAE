@@ -8,8 +8,313 @@ import pandas as pd
 from scipy.sparse.linalg import eigs
 from sklearn.metrics import roc_auc_score, average_precision_score
 import networkx as nx
+from libwon.utils import setup_seed
+from igraph import Graph
+def get_sbm_graph(N, pin, pout, C, directed):
+    """使用随机块模型 (SBM) 生成图。
 
+    Args:
+        N (_type_): 每个社区的节点数量
+        pin (_type_): 社区内部边的生成概率
+        pout (_type_): 社区之间边的生成概率
+        C (_type_): 社区数量
+        directed (_type_): 图是否为有向图
 
+    Returns:
+        _type_: 图中的边数组，形状为 [E, 2]。
+    """
+    sizes = [N] * C
+    in_prob = pin
+    out_prob = pout
+    probs = np.zeros((len(sizes), len(sizes)))
+    for i in range(len(sizes)):
+        for j in range(len(sizes)):
+            probs[i, j] = in_prob if i == j else out_prob
+    G = nx.stochastic_block_model(sizes, probs, directed = directed)
+    edges = [e for e in G.edges()]
+    return np.array(edges) # [E, 2]
+
+def get_er_graph(N, p, directed = False):
+    """生成一个 E-R随机图
+
+    Args:
+        N (_type_): 节点的数量
+        p (_type_): 每对节点之间生成边的概率
+        directed (bool, optional): 图是否为有向图. Defaults to False.
+
+    Returns:
+        _type_: 图中的边数组
+    """
+    G = nx.erdos_renyi_graph(N, p, directed = directed)
+    edges = [e for e in G.edges()]
+    return np.array(edges) # [E, 2]
+
+def get_er_graphs(T = 100, N = 1000, p = 0.001, directed = False, seed = 0):
+    """生成多个时间步的 ER 随机图
+
+    Args:
+        T (int, optional): 时间步数量。 Defaults to 3.
+        N (int, optional): 每个图中的节点数量. Defaults to 2.
+        p (float, optional): 每对节点之间生成边的概率. Defaults to 0.5.
+        directed (bool, optional): 图是否为有向图. Defaults to False.
+        seed (int, optional): 随机种子，用于结果的可重复性. Defaults to 0.
+
+    Returns:
+        _type_: 包含所有时间步的边数组，形状为 [E, 3]，其中每条边由两个节点和一个时间步组成
+    """
+    setup_seed(seed)
+    es = []
+    for t in range(T):
+        e = get_er_graph(N, p, directed)
+        if len(e):
+            time = np.array([t] * e.shape[0]).reshape(e.shape[0],1)
+            es.append(np.concatenate([e, time], axis = -1))
+    es = np.concatenate(es, axis = 0)
+    return es
+
+def get_sbm_graphs(T = 100, N = 1000, p = 0.001, C = 3, directed = False, seed = 0):
+    """生成多个时间步的随机块模型 (SBM) 图
+
+    Args:
+        T (int, optional): 时间步数量. Defaults to 3.
+        N (int, optional): 每个社区的节点数量. Defaults to 2.
+        p (float, optional): 社区内的边生成概率. Defaults to 0.5.
+        C (int, optional): 社区数量. Defaults to 3.
+        directed (bool, optional): 图是否为有向图. Defaults to False.
+        seed (int, optional): 随机种子，用于结果的可重复性. Defaults to 0.
+
+    Returns:
+        _type_: 包含所有时间步的边数组，形状为 [E, 3]，其中每条边由两个节点和一个时间步组成
+    """
+    setup_seed(seed)
+    es = []
+    for t in range(T):
+        e = get_sbm_graph(N, p, C, directed)
+        if len(e):
+            time = np.array([t] * e.shape[0]).reshape(e.shape[0],1)
+            es.append(np.concatenate([e, time], axis = -1))
+    es = np.concatenate(es, axis = 0)
+    return es
+
+class DyGraphGenERCon:
+    def sample_dynamic_graph(self, T = 100, N = 1000 , p = 0.001, directed = False, seed = 0):
+        """生成一个动态ER图的样本
+
+        Args:
+            T (int, optional): 时间步数量.
+            N (int, optional): 节点数量. 
+            p (float, optional): 边生成概率.
+            directed (bool, optional): 图是否为有向图. Defaults to False.
+            seed (int, optional): 随机种子，用于结果的可重复性. Defaults to 0.
+
+        Returns:
+            _type_: 图的详细信息，包括边、节点数量、边数量、时间步等。
+        """
+        es = get_er_graphs(1, N, p, directed, seed)
+        es[:, 2] = np.random.randint(0, T, es.shape[0])
+        es = list(es)
+        # 按时间步和节点编号对边进行排序
+        es = sorted(es, key = lambda x: (x[2], x[0]))
+        es = np.array(es)
+        # 统计节点和边的信息
+        num_nodes = len(set(es[:,:2].flatten()))
+        num_edges = es.shape[0]
+        num_time =  len(set(es[:, 2].flatten()))
+        # 提取 src 和 dst 中的节点编号
+        src_nodes = es[:, 0]
+        dst_nodes = es[:, 1]
+        all_nodes = set(src_nodes).union(set(dst_nodes))
+
+        # 找到超出范围的节点编号
+        out_of_range_nodes = {node for node in all_nodes if node >= num_nodes}
+        print("out_of_range:",out_of_range_nodes)
+        # 找到未使用的节点编号
+        used_nodes = {node for node in all_nodes if node < num_nodes}
+        unused_nodes = [node for node in range(num_nodes) if node not in used_nodes]
+        # 随机打乱未使用的节点编号
+        #rng = np.random.default_rng(seed)
+        #rng.shuffle(unused_nodes)
+        # 构建映射字典
+        mapping = {}
+        unused_idx = 0
+        for node in out_of_range_nodes:
+            if unused_idx < len(unused_nodes):
+                mapping[node] = unused_nodes[unused_idx]
+                unused_idx += 1
+            else:
+                raise ValueError("未使用的节点编号不足以替换超出范围的节点编号")
+
+        # 使用映射字典替换 src 和 dst 中的节点编号
+        for i in range(len(es)):
+            if es[i, 0] in mapping:
+                es[i, 0] = mapping[es[i, 0]]
+            if es[i, 1] in mapping:
+                es[i, 1] = mapping[es[i, 1]]
+
+        info = {"edge_index": es.tolist(), 
+                "num_nodes":num_nodes, 
+                "num_edges":num_edges, 
+                "num_time": num_time, 
+                "T": T,
+                "N":N,
+                "p":p,
+                "directed":directed,
+                "seed":seed
+                }
+        print("info_ercon:",es.tolist())
+        print("node_num:",num_nodes)
+        # 将边列表保存为txt文件
+        np.savetxt('./data/SyntheticDataSets/edges_ercon.txt', es, fmt='%d', delimiter=' ')
+        return info
+    
+class DyGraphGenSBMCon:
+    def sample_dynamic_graph(self, T = 3, N = 2 , p = 0.5, C = 2, directed = False, seed = 0):
+        """使用随机块模型（SBM）生成一个动态图样本
+
+        Args:
+            T (int, optional): 时间步数. 
+            N (int, optional): 总节点数. 
+            p (float, optional): 创建边的概率. 
+            C (int, optional): 社区数量.
+            directed (bool, optional): 是否为有向图. Defaults to False.
+            seed (int, optional): 随机数生成的种子. Defaults to 0.
+
+        Returns:
+            _type_: _description_
+        """
+        setup_seed(seed)
+        es = get_sbm_graph(N//C, p, p/2, C, directed)
+        es = np.concatenate([es, np.zeros((es.shape[0], 1))], axis = -1).astype(int)
+        # import pdb;pdb.set_trace()
+        es[:, 2] = np.random.randint(0, T, es.shape[0])
+        es = list(es)
+        es = sorted(es, key = lambda x: (x[2], x[0]))
+        es = np.array(es)
+
+        num_nodes = len(set(es[:,:2].flatten()))
+        num_edges = es.shape[0]
+        num_time =  len(set(es[:, 2].flatten()))
+
+        # 提取 src 和 dst 中的节点编号
+        src_nodes = es[:, 0]
+        dst_nodes = es[:, 1]
+        all_nodes = set(src_nodes).union(set(dst_nodes))
+        # 找到超出范围的节点编号
+        out_of_range_nodes = {node for node in all_nodes if node >= num_nodes}
+
+        # 找到未使用的节点编号
+        used_nodes = {node for node in all_nodes if node < num_nodes}
+        unused_nodes = [node for node in range(num_nodes) if node not in used_nodes]
+        # 随机打乱未使用的节点编号
+        #rng = np.random.default_rng(seed)
+        #rng.shuffle(unused_nodes)
+        # 构建映射字典
+        mapping = {}
+        unused_idx = 0
+        for node in out_of_range_nodes:
+            if unused_idx < len(unused_nodes):
+                mapping[node] = unused_nodes[unused_idx]
+                unused_idx += 1
+            else:
+                raise ValueError("未使用的节点编号不足以替换超出范围的节点编号")
+
+        # 使用映射字典替换 src 和 dst 中的节点编号
+        for i in range(len(es)):
+            if es[i, 0] in mapping:
+                es[i, 0] = mapping[es[i, 0]]
+            if es[i, 1] in mapping:
+                es[i, 1] = mapping[es[i, 1]]
+
+        info = {"edge_index": es.tolist(), 
+                "num_nodes":num_nodes, 
+                "num_edges":num_edges, 
+                "num_time": num_time, 
+                "T": T,
+                "N":N,
+                "p":p,
+                "directed":directed,
+                "seed":seed
+                }
+        #print("info_ffcon:",info)
+        # 将边列表保存为txt文件
+        np.savetxt('./data/SyntheticDataSets/edges_sbmcon.txt', es, fmt='%d', delimiter=' ')
+        return info
+    
+class DyGraphGenFFCon:
+    def sample_dynamic_graph(self, T, N , p, seed, directed = False):
+        """生成一个动态图的样本，使用 Forest Fire 模型
+
+        Args:
+            T (int, optional): 时间步数量. 
+            N (int, optional): 节点数量. 
+            p (float, optional): Forest Fire 模型的前进概率. 
+            directed (bool, optional): 图是否为有向图. Defaults to False.
+            seed (int, optional): 随机种子，确保可重复性. Defaults to 0.
+
+        Returns:
+            _type_: 包含图信息的字典，包括边、节点和时间步数
+        """
+        setup_seed(seed)
+        # es = get_sbm_graph(N//C, p, p/2, C, directed)
+        es = Graph.Forest_Fire(N, fw_prob = p).get_edgelist()
+        es = np.array(es)
+        es = np.concatenate([es, np.zeros((es.shape[0], 1))], axis = -1).astype(int)
+        # import pdb;pdb.set_trace()
+        es[:, 2] = np.random.randint(0, T, es.shape[0])
+        es = list(es)
+        es = sorted(es, key = lambda x: (x[2], x[0]))
+        es = np.array(es)
+
+        num_nodes = len(set(es[:,:2].flatten()))
+        num_edges = es.shape[0]
+        num_time =  len(set(es[:, 2].flatten()))
+
+        # 提取 src 和 dst 中的节点编号
+        src_nodes = es[:, 0]
+        dst_nodes = es[:, 1]
+        all_nodes = set(src_nodes).union(set(dst_nodes))
+
+        # 找到超出范围的节点编号
+        out_of_range_nodes = {node for node in all_nodes if node >= num_nodes}
+
+        # 找到未使用的节点编号
+        used_nodes = {node for node in all_nodes if node < num_nodes}
+        unused_nodes = [node for node in range(num_nodes) if node not in used_nodes]
+        # 随机打乱未使用的节点编号
+        #rng = np.random.default_rng(seed)
+        #rng.shuffle(unused_nodes)
+        # 构建映射字典
+        mapping = {}
+        unused_idx = 0
+        for node in out_of_range_nodes:
+            if unused_idx < len(unused_nodes):
+                mapping[node] = unused_nodes[unused_idx]
+                unused_idx += 1
+            else:
+                raise ValueError("未使用的节点编号不足以替换超出范围的节点编号")
+
+        # 使用映射字典替换 src 和 dst 中的节点编号
+        for i in range(len(es)):
+            if es[i, 0] in mapping:
+                es[i, 0] = mapping[es[i, 0]]
+            if es[i, 1] in mapping:
+                es[i, 1] = mapping[es[i, 1]]
+       
+        info = {"edge_index": es.tolist(), 
+                "num_nodes":num_nodes, 
+                "num_edges":num_edges, 
+                "num_time": num_time, 
+                "T": T,
+                "N":N,
+                "p":p,
+                "directed":directed,
+                "seed":seed
+                }
+        #print("info_ffcon:",info)
+        # 将边列表保存为txt文件
+        np.savetxt('./data/SyntheticDataSets/edges_ffcon.txt', es, fmt='%d', delimiter=' ')
+        return info
+    
 def load_npy(file_name):
     """Load a SparseGraph from a Numpy binary file.
     Parameters
@@ -456,7 +761,15 @@ def edge_from_scores(scores_matrix, n_edges):
         extra_edges = np.random.choice(probs.shape[0], replace=False, p=probs/probs.sum(), size=int(diff))
         target_g[extra_edges//N, extra_edges%N] = 1
     return target_g
+def main():
+    FF_generator = DyGraphGenFFCon()
+    FF_generator.sample_dynamic_graph(T=100, N=1000, p=0.7, seed=2025,directed=False)
+    ER_generator = DyGraphGenERCon()
+    ER_generator.sample_dynamic_graph(T=100, N=1000, p=0.7, seed=2025,directed=False)
+    SBM_generator = DyGraphGenSBMCon()
+    SBM_generator.sample_dynamic_graph(T=100, N=1000, p=0.9, seed=2025,directed=False)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    main()
     print("Success!")

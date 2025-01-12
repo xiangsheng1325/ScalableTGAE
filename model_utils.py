@@ -221,36 +221,10 @@ class StatisticCollector(Callback):
             model(Cell): The instance of the model being trained.
         """
         model.update_scores_matrix()
-        # roc_auc, avg_prec = link_prediction_performance(scores_matrix=model._scores_matrix, 
-        #                         val_ones=self.test_ones, 
-        #                         val_zeros=self.test_zeros)
 
         generated_graphs = [model.sample_graph() for _ in range(self.n_samples)]
-        # current_overlaps = [edge_overlap(self.A, gg) / model.num_edges for gg in generated_graphs]
         current_overlaps = [edge_overlap(self.A, gg) / self.num_edges for gg in generated_graphs]
         current_overlap = np.mean(current_overlaps)
-        
-        # print("generated_graphs: ", generated_graphs)
-        # stats = [compute_graph_statistics(csr_mat_to_adj_mat(gg)) for gg in generated_graphs]
-        # comp_A = self.A.toarray().reshape(-1, self.A.shape[1], self.A.shape[1])
-        # for i in range(len(comp_A)):
-        #     comp_A[i] = comp_A[i] + comp_A[i].T + np.eye(comp_A[i].shape[0])
-        # comp_A = sp.csr_matrix(comp_A.reshape(self.A.shape[0], self.A.shape[1]))
-        # comp_A[comp_A > 1] = 1
-        
-        # For filtered graph
-        # N = generated_graphs[0].shape[1]
-        # T = len(nonzero_rows) // N
-        # count_rows = np.array([np.count_nonzero(nonzero_rows[N * t : N * t + 1]) for t in range(T)])
-        # assert count_rows.sum() == generated_graphs[0].shape[0]
-        # for i in range(len(generated_graphs)):
-        #     tmp_g = np.zeros((N * T, N))
-        #     for t in range(T):
-        #         generated_graphs[i][count_rows[0:t].sum() : count_rows[0:t+1].sum()] &= nonzero_rows[N * t : N * t + 1]
-        #     tmp_g[np.nonzero(nonzero_rows)] = generated_graphs[i]
-        #     tmp_g = tmp_g + tmp_g.T
-        #     tmp_g[tmp_g > 1] = 1
-        #     generated_graphs[i] = tmp_g
 
         generated_graphs = np.array([gg.toarray().reshape(-1, gg.shape[1], gg.shape[1]) for gg in generated_graphs])
 
@@ -265,18 +239,10 @@ class StatisticCollector(Callback):
                     generated_graphs[i][j][generated_graphs[i][j] > 1] = 1
         
         # Save graphs
-        print("g_graph:",self.g_path)
-        print("last:",last)
         if last and self.g_path:
             np.save(self.g_path, np.array(generated_graphs))
 
         stats = [[compute_graph_statistics(csr_matrix(i)) for i in gg] for gg in generated_graphs]
-        # stats = [{"Placeholder": 0.} for gg in generated_graphs]
-        # for i, x in enumerate(stats):
-        #     x['ROC-AUC'] = roc_auc
-        #     x['AVG-PREC'] = avg_prec
-        #     x['EO'] = current_overlaps[i]
-        # print("stats: ", stats)
         if self.graphic_mode == 'overlap':
             self.training_stat.append({'overlap': current_overlap, 'stats': stats})
         else:
