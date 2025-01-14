@@ -103,23 +103,22 @@ def cal_avg_median_stats(adj, gen_mat):
             f_med[key] = np.median(vals)
     return f_avg, f_med
     
-
 class ParseArguments(object):
     def __init__(self):
         self.device = 'cuda:0'
-        self.n_layers = 1
-        self.H = 128
-        self.n_heads = 4
-        self.batch_size = 128
+        self.n_layers = 2  # 增加层数
+        self.H = 256       # 增加隐藏层维度
+        self.n_heads = 8   # 增加注意力头数
+        self.batch_size = 64  # 减小批量大小
         self.g_type = 'temporal'
-        self.lr = 4e-3
-        self.weight_decay = 1e-4
-        self.max_epochs = 500
-        self.graphic_mode = 'overlap'
+        self.lr = 1e-3     # 降低学习率
+        self.weight_decay = 5e-4  # 增加权重衰减
+        self.max_epochs = 300     # 减少最大迭代次数
+        self.graphic_mode = 'overlay'  # 改变模式
         self.criterion = 'eo'
-        self.eo_limit = 0.99
-        self.seed = 2024
-
+        self.eo_limit = 0.95  # 调整限制
+        self.seed = 2024   
+           
 args = ParseArguments()
 if args.seed is not None:
     random_seed(args.seed)
@@ -154,7 +153,7 @@ if __name__ == '__main__':
     
     best_f_avg = {}
     best_f_med = {}
-    
+   
     for epoch in range(args.max_epochs):
         num_edges_all = 0
         num_loss_all = 0

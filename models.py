@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from zmq import device
 from layers import GraphConvolution, GraphAttentionLayer, SpGraphAttentionLayer
 DTYPE = torch.float32
-
+import scipy.sparse as sp
 
 class EmbeddingEncoder(nn.Module):
     def __init__(self, N, H, pretrained_emb=None):
@@ -100,64 +100,6 @@ class G_temporal(nn.Module):
         W = self.decoder(self.encoder(pretrained_emb=pretrained_emb))
         # W -= W.max(dim=-1, keepdims=True)[0]
         return W
-    
-class TransformerLayer(nn.Module):
-    def __init__(self, in_dim=128, hid_dim=32, n_heads=4, dropout=0.1):
-        super(TransformerLayer, self).__init__()
-        self.hid_dim = hid_dim
-        self.n_heads = n_heads
-        self.d_k = hid_dim // n_heads
-
-        # Multi-Head Attention components
-        self.q_proj = nn.Linear(in_dim, hid_dim)
-        self.k_proj = nn.Linear(in_dim, hid_dim)
-        self.v_proj = nn.Linear(in_dim, hid_dim)
-        self.out_proj = nn.Linear(hid_dim, hid_dim)
-
-        # Feedforward network
-        self.ffn = nn.Sequential(
-            nn.Linear(hid_dim, 4 * hid_dim),
-            nn.ReLU(),
-            nn.Linear(4 * hid_dim, hid_dim)
-        )
-
-        # Normalization and dropout
-        self.norm1 = nn.LayerNorm(hid_dim)
-        self.norm2 = nn.LayerNorm(hid_dim)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, graph, feat):
-        # Multi-Head Self-Attention
-        # 确保 feat 的大小与目标节点数量一致
-        # if feat.is_sparse:
-        #     feat = feat.to_dense()
-        # feat = feat[:graph.number_of_dst_nodes()]
-        # feat = feat[:graph.number_of_dst_nodes()]
-        print(graph.dstdata.keys())
-        dst_nodes = graph.dstdata['_ID']
-        feat = feat.to_dense()
-        feat = feat[dst_nodes]
-        q = self.q_proj(feat).view(-1, self.n_heads, self.d_k)
-        k = self.k_proj(feat).view(-1, self.n_heads, self.d_k)
-        v = self.v_proj(feat).view(-1, self.n_heads, self.d_k)
-        print("feat.shape:", feat.shape)
-        print("number of dst nodes:", graph.number_of_dst_nodes())
-        graph.srcdata.update({'k': k, 'v': v})
-        graph.dstdata.update({'q': q})
-        graph.apply_edges(fn.u_dot_v('q', 'k', 'score'))
-        e = graph.edata.pop('score') / (self.d_k ** 0.5)
-        graph.edata['a'] = edge_softmax(graph, e)
-        graph.update_all(fn.u_mul_e('v', 'a', 'm'), fn.sum('m', 'z'))
-        z = graph.dstdata['z'].reshape(-1, self.hid_dim)
-
-        # Residual connection and layer normalization
-        z = self.norm1(feat + self.dropout(self.out_proj(z)))
-
-        # Feedforward network with residual connection
-        ff_out = self.ffn(z)
-        z = self.norm2(z + self.dropout(ff_out))
-
-        return z
 
 class GATLayer(nn.Module):
     def __init__(self, in_dim=128, hid_dim=32, n_heads=4):
@@ -200,19 +142,49 @@ class GATLayer(nn.Module):
         rst = gate * rst + (1 - gate) * skip_feat
         return self.activation(self.norm(rst))
 
+class GraphTransformerLayer(nn.Module):
+    def __init__(self, in_dim, hid_dim, n_heads, dropout=0.1):
+        super(GraphTransformerLayer, self).__init__()
+        self.n_heads = n_heads
+        self.hid_dim = hid_dim
+        self.head_dim = hid_dim // n_heads
+        self.sqrt_dh = self.head_dim ** 0.5
+        self.query = nn.Linear(in_dim, hid_dim)
+        self.key = nn.Linear(in_dim, hid_dim)
+        self.value = nn.Linear(in_dim, hid_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.fc_out = nn.Linear(hid_dim, hid_dim)
+        self.layer_norm = nn.LayerNorm(hid_dim)
+    
+    def forward(self, adjacency_matrix,feat):
+        print("feat shape:",feat.shape)
+        print("feat:",feat)
+        # 获取输入特征的形状，B 表示 batch 大小，N 表示节点数量，_ 表示特征维度
+        B, N, _ = feat.shape
+        Q = self.query(feat).view(B, N, self.n_heads, self.head_dim)
+        K = self.key(feat).view(B, N, self.n_heads, self.head_dim)
+        V = self.value(feat).view(B, N, self.n_heads, self.head_dim)
+        attn_scores = torch.einsum("bihd,bjhd->bijh", [Q, K]) / self.sqrt_dh
+        mask = adjacency_matrix.unsqueeze(1).unsqueeze(3).expand_as(attn_scores)
+        attn_scores = torch.where(mask, attn_scores, torch.tensor(float('-inf')).to(attn_scores.device))
+        attn_probs = F.softmax(attn_scores, dim=2)
+        attn_probs = self.dropout(attn_probs)
+        attn_output = torch.einsum("bijh,bjhd->bihd", [attn_probs, V])
+        attn_output = attn_output.reshape(B, N, self.hid_dim)
+        output = self.fc_out(attn_output)
+        output = self.layer_norm(output)
+        return output
 
 class ScalableTGAE(nn.Module):
-    def __init__(self, in_dim=128, hid_dim=32, n_heads=4, out_dim=128,dropout=0.1):
+    def __init__(self, in_dim=128, hid_dim=32, n_heads=4, out_dim=128):
         super(ScalableTGAE, self).__init__()
-        # self.input_encoder = nn.Linear(out_dim, in_dim)
-        # self.attention_encoder = GATLayer(in_dim=in_dim, hid_dim=hid_dim, n_heads=n_heads)
-        self.attention_encoder = TransformerLayer(in_dim=in_dim, hid_dim=hid_dim, n_heads=n_heads, dropout=dropout)
-        # self.decoder = nn.Linear(n_heads * hid_dim, out_dim)
-        self.decoder = nn.Linear(hid_dim, out_dim)
-
-    def forward(self, blocks, feat):
-        return self.decoder(self.attention_encoder(blocks[0], feat))
+        self.attention_encoder = GraphTransformerLayer(in_dim=in_dim, hid_dim=hid_dim, n_heads=n_heads)
+        self.decoder = nn.Linear(n_heads * hid_dim, out_dim)
     
+    def forward(self,adjacency_matrix,feat):
+        encoded_feat = self.attention_encoder(adjacency_matrix,feat)
+        return self.decoder(encoded_feat)
+
 def coo_to_csp(sp_coo):
     num = sp_coo.shape[0]
     feat_num = sp_coo.shape[1]
@@ -222,8 +194,16 @@ def coo_to_csp(sp_coo):
                                          torch.tensor(sp_coo.data),
                                          torch.Size([num, feat_num]))
     return sp_tensor
-
-
+# def coo_to_csp(sp_coo):
+#     num = sp_coo.shape[0]
+#     feat_num = sp_coo.shape[1]
+#     row = sp_coo.row
+#     col = sp_coo.col
+#     sp_tensor = torch.sparse.FloatTensor(torch.LongTensor(np.stack([row, col])),
+#                                          torch.tensor(sp_coo.data),
+#                                          torch.Size([num, feat_num]))
+#     # 确保返回的是张量
+#     return sp_tensor.to_dense()
 if __name__ == '__main__':
     import dgl
     import torch
