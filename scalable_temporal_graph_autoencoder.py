@@ -71,7 +71,13 @@ def random_seed(seed=2024):
     torch.cuda.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-    
+
+def adjust_tensor_size_by_slicing(tensor1, tensor2):
+    min_size = min(tensor1.size(0), tensor2.size(0))
+    tensor1 = tensor1[:min_size]
+    tensor2 = tensor2[:min_size]
+    return tensor1, tensor2
+
 def compute_temporal_graph_statistics(A_T):
     seq_len = A_T.shape[0]//A_T.shape[1]
     num_nodes = A_T.shape[1]
@@ -162,9 +168,11 @@ if __name__ == '__main__':
             batch_inputs, batch_labels = coo_to_csp(feat[input_nodes.cpu(), :].tocoo()).to(args.device), \
                                          coo_to_csp(adj[seeds.cpu(), :].tocoo()).to_dense().to(args.device)
             blocks = [block.to(args.device) for block in blocks]
-            train_batch_logits = model(blocks, batch_inputs)
+            train_batch_logits = model(blocks,batch_inputs)
             num_edges = batch_labels.sum() / 2
             num_edges_all += num_edges
+            # 调整 batch_labels 和 train_batch_logits 的维度使其匹配
+            batch_labels, train_batch_logits = adjust_tensor_size_by_slicing(batch_labels, train_batch_logits)
             loss = -0.5 * torch.sum(batch_labels * torch.log_softmax(train_batch_logits, dim=-1)) / num_edges
             num_loss_all += loss.cpu().data * num_edges
             optimizer.zero_grad()
@@ -182,19 +190,30 @@ if __name__ == '__main__':
             gen_mat = sp.csr_matrix(adj.shape)
             model.eval()
             with torch.no_grad():
-                for step, (input_nodes, seeds, blocks) in enumerate(train_dataloader):
+                for step, (input_nodes, seeds, blocks) in enumerate(train_dataloader):   
                     test_inputs = coo_to_csp(feat[input_nodes.cpu(), :].tocoo()).to(args.device)
                     blocks = [block for block in blocks]
                     test_batch_logits = torch.softmax(model(blocks, test_inputs), dim=-1)
                     num_edges = adj[seeds.cpu(), :].sum()
-                    gen_mat[seeds.cpu(), :] = edge_from_scores(test_batch_logits.cpu().numpy(), num_edges)
-                    if (step+1) % 20 == 0:
-                        print("Epoch: {:03d}, Generating Step: {:03d}".format(epoch+1, step+1))
+                    #gen_mat[seeds.cpu(), :] = edge_from_scores(test_batch_logits.cpu().numpy(), num_edges)
+                    edges = edge_from_scores(test_batch_logits.cpu().numpy(), num_edges)
+                    # 调整 edges 的形状以匹配 gen_mat[seeds.cpu(), :] 的形状
+                    expected_shape = (len(seeds.cpu()), 2)  # 假设 edge_from_scores 生成的 edges 应该是 (len(seeds), 2) 的形状
+                    if edges.shape!= expected_shape:
+                        if edges.shape[0] < expected_shape[0]:
+                            pad_size = expected_shape[0] - edges.shape[0]
+                            padding = np.zeros((pad_size, expected_shape[1]))
+                            edges = np.concatenate([edges, padding], axis=0)
+                        elif edges.shape[0] > expected_shape[0]:
+                            edges = edges[:expected_shape[0]]
+                    gen_mat[seeds.cpu(), :] = edges
+                    if (step + 1) % 20 == 0:
+                        print("Epoch: {:03d}, Generating Step: {:03d}".format(epoch + 1, step + 1))
                     else:
                         sys.stdout.flush()
-                        sys.stdout.write("Epoch: {:03d}, Generating Step: {:03d}\r".format(epoch+1, step+1))
+                        sys.stdout.write("Epoch: {:03d}, Generating Step: {:03d}\r".format(epoch + 1, step + 1))
                         sys.stdout.flush()
-            eo = adj.multiply(gen_mat).sum() / adj.sum()
+                    eo = adj.multiply(gen_mat).sum() / adj.sum()
             sp.save_npz(os.path.join("./data/DBLP", "gen_mat.npz".format(epoch+1)), gen_mat)
             print("Epoch: {:03d}, Edge Overlap: {:07f}".format(epoch + 1, eo))
             

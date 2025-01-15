@@ -142,48 +142,145 @@ class GATLayer(nn.Module):
         rst = gate * rst + (1 - gate) * skip_feat
         return self.activation(self.norm(rst))
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import dgl.function as fn
+
+
 class GraphTransformerLayer(nn.Module):
-    def __init__(self, in_dim, hid_dim, n_heads, dropout=0.1):
+    def __init__(self, in_dim=128, hid_dim=32, n_heads=4, dropout=0.1):
         super(GraphTransformerLayer, self).__init__()
-        self.n_heads = n_heads
         self.hid_dim = hid_dim
+        self.n_heads = n_heads
         self.head_dim = hid_dim // n_heads
-        self.sqrt_dh = self.head_dim ** 0.5
-        self.query = nn.Linear(in_dim, hid_dim)
-        self.key = nn.Linear(in_dim, hid_dim)
-        self.value = nn.Linear(in_dim, hid_dim)
-        self.dropout = nn.Dropout(dropout)
-        self.fc_out = nn.Linear(hid_dim, hid_dim)
-        self.layer_norm = nn.LayerNorm(hid_dim)
-    
-    def forward(self, adjacency_matrix,feat):
-        print("feat shape:",feat.shape)
-        print("feat:",feat)
-        # 获取输入特征的形状，B 表示 batch 大小，N 表示节点数量，_ 表示特征维度
-        B, N, _ = feat.shape
-        Q = self.query(feat).view(B, N, self.n_heads, self.head_dim)
-        K = self.key(feat).view(B, N, self.n_heads, self.head_dim)
-        V = self.value(feat).view(B, N, self.n_heads, self.head_dim)
-        attn_scores = torch.einsum("bihd,bjhd->bijh", [Q, K]) / self.sqrt_dh
-        mask = adjacency_matrix.unsqueeze(1).unsqueeze(3).expand_as(attn_scores)
-        attn_scores = torch.where(mask, attn_scores, torch.tensor(float('-inf')).to(attn_scores.device))
-        attn_probs = F.softmax(attn_scores, dim=2)
-        attn_probs = self.dropout(attn_probs)
-        attn_output = torch.einsum("bijh,bjhd->bihd", [attn_probs, V])
-        attn_output = attn_output.reshape(B, N, self.hid_dim)
-        output = self.fc_out(attn_output)
-        output = self.layer_norm(output)
-        return output
+        self.sqrt_dk = self.head_dim ** 0.5
+        # 多头线性变换
+        self.Q = nn.Linear(in_dim, hid_dim)
+        self.K = nn.Linear(in_dim, hid_dim)
+        self.V = nn.Linear(in_dim, hid_dim)
+        self.attn_dropout = nn.Dropout(dropout)
+        self.ffn = nn.Sequential(
+            nn.Linear(hid_dim, hid_dim * 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hid_dim * 2, hid_dim)
+        )
+        self.norm1 = nn.LayerNorm(hid_dim)
+        self.norm2 = nn.LayerNorm(hid_dim)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.Q.weight)
+        nn.init.xavier_uniform_(self.K.weight)
+        nn.init.xavier_uniform_(self.V.weight)
+        for layer in self.ffn:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+
+    def forward(self, graph, feat):
+        # 线性变换得到 Q, K, V
+        Q = self.Q(feat).view(-1, self.n_heads, self.head_dim)
+        K = self.K(feat).view(-1, self.n_heads, self.head_dim)
+        V = self.V(feat).view(-1, self.n_heads, self.head_dim)
+        # 存储 Q, K, V 到图的源节点数据
+        graph.srcdata['Q'] = Q
+        graph.srcdata['K'] = K
+        graph.srcdata['V'] = V
+        # print("graph srcdata:",graph.srcdata.keys())
+        # # 打印 Q, K, V 的信息，用于调试
+        # print("Q shape:", Q.shape)
+        # print("K shape:", K.shape)
+        # print("V shape:", V.shape)
+        # print("Q dtype:", Q.dtype)
+        # print("K dtype:", K.dtype)
+        # print("V dtype:", V.dtype)
+        # 检查存储是否成功
+        if 'Q' not in graph.srcdata or 'K' not in graph.srcdata or 'V' not in graph.srcdata:
+            print("Keys not found in graph.srcdata after update:", graph.srcdata.keys())
+            raise KeyError("Keys 'Q' or 'K' or 'V' not found in graph.srcdata")
+        # 计算注意力得分
+        # graph.srcdata.update({'Q': Q, 'K': K, 'V': V})
+        #获取源节点的 K 和目标节点的 Q , 使用 torch.einsum 计算注意力得分
+        src_K = graph.srcdata['K']
+        dst_Q = graph.dstdata.get('Q', graph.srcdata['Q'][:graph.number_of_dst_nodes()])
+        # 确保 src_K 和 dst_Q 的节点数量一致
+        if src_K.shape[0] > dst_Q.shape[0]:
+            pad_size = src_K.shape[0] - dst_Q.shape[0]
+            device = src_K.device  # 获取 src_K 的设备
+            dst_Q = torch.cat([dst_Q, torch.zeros(pad_size, self.n_heads, self.head_dim, device=device)], dim=0)
+        else:
+            pad_size = dst_Q.shape[0] - src_K.shape[0]
+            device = dst_Q.device  # 获取 dst_Q 的 device
+            src_K = torch.cat([src_K, torch.zeros(pad_size, self.n_heads, self.head_dim, device=device)], dim=0)
+        # 使用 torch.einsum 计算注意力得分
+        scores = torch.einsum('bhd,bhd->bh', src_K, dst_Q)
+        # 确保 scores 的维度与边的数量匹配
+        num_edges = graph.number_of_edges()
+        if scores.shape[0] < num_edges:
+            pad_size = num_edges - scores.shape[0]
+            device = scores.device  # 获取 scores 的设备
+            padding = torch.zeros(pad_size, scores.shape[1], device=device)
+            scores = torch.cat((scores, padding), dim=0)
+        elif scores.shape[0] > num_edges:
+            scores = scores[:num_edges]
+        graph.edata['score'] = scores.unsqueeze(-1)
+        # 缩放分数
+        graph.edata['score'] = graph.edata['score'] / self.sqrt_dk
+        graph.edata['score'] = F.softmax(graph.edata['score'], dim=-1)
+        graph.edata['score'] = self.attn_dropout(graph.edata['score'])
+        # 消息传递
+        graph.update_all(fn.u_mul_e('V', 'score', 'm'), fn.sum('m', 'attn_out'))
+        attn_out = graph.dstdata['attn_out'].view(-1, self.hid_dim)
+        # 残差连接和层归一化
+        # feat = self.norm1(feat + attn_out)
+      
+        # 调整 attn_out 和 feat 的维度使其匹配
+        min_shape = min(attn_out.shape[0], feat.shape[0])
+        if feat.is_sparse:
+            feat = feat.to_dense()
+        attn_out = attn_out[:min_shape]
+        feat = feat[:min_shape]
+        # 调整 feat 的特征维度使其与 attn_out 的特征维度匹配
+        if feat.shape[1]!= attn_out.shape[1]:
+            if feat.shape[1] > attn_out.shape[1]:
+                feat = feat[:, :attn_out.shape[1]]
+            else:
+                # 填充 feat 使其维度与 attn_out 匹配
+                pad_size = attn_out.shape[1] - feat.shape[1]
+                padding = torch.zeros(feat.shape[0], pad_size, device=feat.device)
+                feat = torch.cat([feat, padding], dim=1)
+        feat = self.norm1(attn_out + feat)
+        # 前馈网络
+        ffn_out = self.ffn(feat)
+        # 残差连接和层归一化
+        out = self.norm2(feat + ffn_out)
+        return out
 
 class ScalableTGAE(nn.Module):
-    def __init__(self, in_dim=128, hid_dim=32, n_heads=4, out_dim=128):
+    def __init__(self, in_dim=128, hid_dim=32, n_heads=4, out_dim=128, dropout=0.1):
         super(ScalableTGAE, self).__init__()
-        self.attention_encoder = GraphTransformerLayer(in_dim=in_dim, hid_dim=hid_dim, n_heads=n_heads)
-        self.decoder = nn.Linear(n_heads * hid_dim, out_dim)
+        # self.input_encoder = nn.Linear(out_dim, in_dim)
+        # 使用新的 GraphTransformerLayer 作为 attention 层
+        self.attention_encoder = GraphTransformerLayer(in_dim=in_dim, hid_dim=hid_dim, n_heads=n_heads, dropout=dropout)
+        # self.decoder = nn.Linear(n_heads * hid_dim, out_dim)
+        self.decoder = nn.Linear(hid_dim, out_dim)
+
+    def forward(self, blocks, feat):
+        # 确保 blocks 中的第一个图块和 feat 输入符合 GraphTransformerLayer 的输入要求
+        # blocks 是图块列表，feat 是节点特征
+        # 这里将 blocks[0] 作为图输入，feat 作为节点特征输入
+        return self.decoder(self.attention_encoder(blocks[0], feat))
+
+# class ScalableTGAE(nn.Module):
+#     def __init__(self, in_dim=128, hid_dim=32, n_heads=4, out_dim=128):
+#         super(ScalableTGAE, self).__init__()
+#         self.attention_encoder = GraphTransformerLayer(in_dim=in_dim, hid_dim=hid_dim, n_heads=n_heads)
+#         self.decoder = nn.Linear(n_heads * hid_dim, out_dim)
     
-    def forward(self,adjacency_matrix,feat):
-        encoded_feat = self.attention_encoder(adjacency_matrix,feat)
-        return self.decoder(encoded_feat)
+#     def forward(self,adjacency_matrix,feat):
+#         encoded_feat = self.attention_encoder(adjacency_matrix,feat)
+#         return self.decoder(encoded_feat)
 
 def coo_to_csp(sp_coo):
     num = sp_coo.shape[0]
@@ -211,8 +308,8 @@ if __name__ == '__main__':
     import scipy.sparse as sp
     import os
     from scalable_temporal_graph_autoencoder import FromTemporalGraphToSparseAdj
-    from dgl.dataloading.neighbor import MultiLayerFullNeighborSampler
-    from dgl.dataloading.pytorch import NodeDataLoader
+    from dgl.dataloading import MultiLayerFullNeighborSampler
+    from dgl.dataloading import DataLoader
     label_adj, nids = FromTemporalGraphToSparseAdj()
     label_mat = label_adj.tocsr()[nids, :]
     t = 195
@@ -221,11 +318,11 @@ if __name__ == '__main__':
     # feat_tensor = torch.sparse_coo_tensor(torch.tensor([feat.col, feat.row]), feat.data)
     adj = label_adj.tocsr()
     # adj_tensor = torch.sparse_coo_tensor(torch.tensor([src, dst]), adj.data)
-    dgl_g = dgl.load_graphs(os.path.join("/home/xuchenhao/datasets/CollegeMsg/", "dgl_graph.bin"))[0][0]
+    dgl_g = dgl.load_graphs(os.path.join("./data/DBLP/", "dgl_graph.bin"))[0][0]
     # dgl_g = dgl.to_bidirected(dgl_g, copy_ndata=True)
     dgl_g = dgl.add_self_loop(dgl_g)
-    train_sampler = MultiLayerFullNeighborSampler(n_layers=1)
-    train_dataloader = NodeDataLoader(dgl_g,
+    train_sampler = MultiLayerFullNeighborSampler(num_layers=1)
+    train_dataloader = DataLoader(dgl_g,
                                       nids=torch.from_numpy(nids).long(),
                                       block_sampler=train_sampler,
                                       device='cpu',
